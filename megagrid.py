@@ -1,6 +1,6 @@
 import gymnasium as gym
 from minigrid.core.grid import Grid
-from minigrid.core.world_object import Goal, Wall, Door, Key, WorldObj
+from minigrid.core.world_object import Wall, Door, Key, WorldObj
 from minigrid.core.mission import MissionSpace
 from minigrid.core.constants import COLORS, COLOR_NAMES
 from minigrid.utils.rendering import fill_coords, point_in_rect, point_in_triangle
@@ -18,18 +18,23 @@ if 'pink' not in COLORS:
 if 'white' not in COLORS:
     COLORS['white'] = (255, 255, 255)
 
-VALID_COLORS = ['red', 'green', 'blue', 'purple', 'yellow']
+VALID_COLORS = ['red', 'green', 'blue', 'purple']
 
 class Star(WorldObj):
     def __init__(self):
-        super().__init__('ball', 'yellow')  # Use 'yellow' instead of 'white'
+        super().__init__('ball', 'yellow')  # Changed to use 'yellow' instead of 'white'
 
 class Agent:
-    def __init__(self, dir=0, color='red'):
+    def __init__(self, dir=0, color='yellow'):  # Changed default color to 'yellow'
         self.dir = dir
         self.color = color
-        self.keys = []  # List to store collected keys
-        self.stars = 0  # Count of collected stars
+        self.key = None
+        self.stars = 0
+
+    @property
+    def current_color(self):
+        # Return the color of the held key, or yellow if no key
+        return self.key if self.key else 'yellow'  # Changed default to 'yellow'
 
 class MegaGrid(gym.Env):
     metadata = {
@@ -45,18 +50,15 @@ class MegaGrid(gym.Env):
         self.observation_space = gym.spaces.Dict(
             {
                 "image": gym.spaces.Box(
-                    low=0, high=255, shape=(7, 7, 3), dtype=np.uint8
+                    low=0, high=255, shape=(21, 21, 3), dtype=np.uint8
                 ),
-                "direction": gym.spaces.Discrete(4),
-                "agent_pos": gym.spaces.Box(
-                    low=0, high=max(width, height), shape=(2,), dtype=np.int32
-                )
+                "description": gym.spaces.Text(max_length=200)  # Increased length for detailed descriptions
             }
         )
 
         self.action_space = gym.spaces.Discrete(5)  # 0: left, 1: right, 2: forward, 3: down, 4: interact
 
-        self.mission_space = MissionSpace(mission_func=lambda: "Reach the goal")
+        self.mission_space = MissionSpace(mission_func=lambda: "Collect stars and unlock doors")
 
         self.render_mode = render_mode
         self.window = None
@@ -64,6 +66,8 @@ class MegaGrid(gym.Env):
         self.cell_size = 10  # Size of each cell in pixels
 
         self.step_count = 0
+
+        self.last_action_description = ""
 
     @classmethod
     def make(cls, render_mode="human"):
@@ -92,16 +96,13 @@ class MegaGrid(gym.Env):
         door_count = sum(self._count_doors(room) for room in self.rooms)
         print(f"Total number of doors: {door_count}")
         
-        # Place the goal in a random room
-        self.goal_pos = self.place_obj(Goal())
-        
-        # Place the agent in a random room (different from the goal)
+        # Place the agent in a random room
         self.agent_pos = self.place_agent()
-        self.agent_dir = random.randint(0, 3)  # Random initial direction
+        self.agent_dir = random.randint(0, 3)
         self.agent = Agent(self.agent_dir, 'red')
 
         # Place stars in random empty positions
-        num_stars = len(self.rooms) // 2  # Adjust this number as needed
+        num_stars = len(self.rooms) // 2
         for _ in range(num_stars):
             self.place_obj(Star())
 
@@ -213,10 +214,29 @@ class MegaGrid(gym.Env):
         x, y, w, h = room
         attempts = 0
         max_attempts = 100  # Prevent infinite loop
+        
+        def is_adjacent_to_door(pos_x, pos_y):
+            # Check all adjacent cells for doors
+            adjacent_positions = [
+                (pos_x + 1, pos_y),
+                (pos_x - 1, pos_y),
+                (pos_x, pos_y + 1),
+                (pos_x, pos_y - 1)
+            ]
+            for adj_x, adj_y in adjacent_positions:
+                if (0 <= adj_x < self.width and 
+                    0 <= adj_y < self.height and 
+                    isinstance(self.grid.get(adj_x, adj_y), Door)):
+                    return True
+            return False
+
         while attempts < max_attempts:
             key_x = random.randint(x, x + w - 1)
             key_y = random.randint(y, y + h - 1)
-            if self.grid.get(key_x, key_y) is None:
+            
+            # Check if position is empty and not adjacent to a door
+            if (self.grid.get(key_x, key_y) is None and 
+                not is_adjacent_to_door(key_x, key_y)):
                 self.grid.set(key_x, key_y, Key(key_color))
                 print(f"Key placed at ({key_x}, {key_y}) with color {key_color}")  # Debug print
                 return
@@ -240,14 +260,14 @@ class MegaGrid(gym.Env):
         if pos[0] < 0 or pos[0] >= self.width or pos[1] < 0 or pos[1] >= self.height:
             return False
         cell = self.grid.get(*pos)
-        return cell is None or isinstance(cell, Goal) or (isinstance(cell, Door) and cell.is_open)
+        return cell is None or (isinstance(cell, Door) and cell.is_open)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self._gen_grid(self.width, self.height)
         self.step_count = 0
         self.agent.stars = 0
-        self.agent.keys = []
+        self.agent.key = None
 
         obs = self._get_obs()
         info = self._get_info()
@@ -259,38 +279,38 @@ class MegaGrid(gym.Env):
         reward = 0
         done = False
 
+        # Clear the last action description
+        self.last_action_description = ""
+
         if action == 4:  # Interact
             self._interact()
         else:
-            # Calculate next position based on action
+            # Movement actions with detailed descriptions
             next_pos = list(self.agent_pos)
+            direction = ""
             if action == 0:  # Left
                 next_pos[0] -= 1
-                self.agent_dir = 2  # Face left
+                self.agent_dir = 2
+                direction = "left"
             elif action == 1:  # Right
                 next_pos[0] += 1
-                self.agent_dir = 0  # Face right
+                self.agent_dir = 0
+                direction = "right"
             elif action == 2:  # Forward/Up
                 next_pos[1] -= 1
-                self.agent_dir = 3  # Face up
+                self.agent_dir = 3
+                direction = "up"
             elif action == 3:  # Down
                 next_pos[1] += 1
-                self.agent_dir = 1  # Face down
+                self.agent_dir = 1
+                direction = "down"
 
-            # Convert next_pos to tuple and check if movement is possible
             next_pos = tuple(next_pos)
             if self._can_move_to(next_pos):
                 self.agent_pos = next_pos
+            else:
+                cell = self.grid.get(*next_pos) if 0 <= next_pos[0] < self.width and 0 <= next_pos[1] < self.height else None
 
-            # Update the agent object's direction
-            self.agent.dir = self.agent_dir
-
-        # Check for goal completion
-        if self.agent_pos == self.goal_pos:
-            reward = 1
-            done = True
-
-        # Check for max steps
         if self.step_count >= self.max_steps:
             done = True
 
@@ -304,35 +324,63 @@ class MegaGrid(gym.Env):
 
     def _get_obs(self):
         # Create a partial observation of the grid around the agent
-        obs_size = 11  # Changed from 7 to 11
+        obs_size = 21
         obs = np.zeros((obs_size, obs_size, 3), dtype=np.uint8)
+        
+        # Calculate the center of the observation window
+        center = obs_size // 2
+        
+        # Get the FOV cells (visible cells not blocked by walls)
+        fov_cells = set(self._get_fov())
         
         for i in range(obs_size):
             for j in range(obs_size):
-                x = self.agent_pos[0] + i - obs_size // 2
-                y = self.agent_pos[1] + j - obs_size // 2
-                if 0 <= x < self.width and 0 <= y < self.height:
-                    cell = self.grid.get(x, y)
-                    if cell is None:
-                        obs[i, j] = (0, 0, 0)  # Empty cell
-                    elif isinstance(cell, Goal):
-                        obs[i, j] = (0, 255, 0)  # Goal
-                    elif isinstance(cell, Wall):
-                        obs[i, j] = (128, 128, 128)  # Wall
+                # Calculate world coordinates (always aligned to north)
+                world_x = self.agent_pos[0] + (i - center)
+                world_y = self.agent_pos[1] + (j - center)
+                
+                if 0 <= world_x < self.width and 0 <= world_y < self.height:
+                    cell = self.grid.get(world_x, world_y)
+                    
+                    if (world_x, world_y) in fov_cells:
+                        # Cell is visible
+                        if cell is None:
+                            obs[j, i] = (0, 0, 0)  # Empty cell
+                        elif isinstance(cell, Wall):
+                            obs[j, i] = (128, 128, 128)  # Wall
+                        elif isinstance(cell, Door):
+                            # Make doors more visible with brighter colors
+                            door_color = COLORS[cell.color]
+                            if cell.is_open:
+                                # Make open doors slightly darker than closed ones
+                                obs[j, i] = tuple(max(0, c - 50) for c in door_color)
+                            else:
+                                obs[j, i] = door_color
+                        elif isinstance(cell, Key):
+                            obs[j, i] = COLORS[cell.color]  # Key color
+                        elif isinstance(cell, Star):
+                            obs[j, i] = COLORS['yellow']  # Star color
+                        
+                        # Add agent position to observation
+                        if (world_x, world_y) == self.agent_pos:
+                            obs[j, i] = COLORS[self.agent.current_color]  # Agent color
+                    else:
+                        # Cell is not visible - show as wall color if beyond a wall
+                        obs[j, i] = (128, 128, 128)  # Wall color for non-visible cells
                 else:
-                    obs[i, j] = (255, 255, 255)  # Out of bounds
+                    # Out of bounds is now treated the same as areas beyond walls
+                    obs[j, i] = (128, 128, 128)  # Wall color
 
         return {
             "image": obs,
-            "direction": self.agent_dir,
-            "agent_pos": self.agent_pos
+            "description": self.last_action_description
         }
 
     def _get_info(self):
         return {
             "steps": self.step_count,
             "agent_pos": self.agent_pos,
-            "goal_pos": self.goal_pos
+            "stars": self.agent.stars
         }
 
     def render(self):
@@ -372,8 +420,6 @@ class MegaGrid(gym.Env):
                     door_color = COLORS[cell.color]
                     pygame.draw.rect(canvas, door_color, rect)
                     pygame.draw.rect(canvas, (0, 0, 0), rect, 1)  # Black outline
-                elif isinstance(cell, Goal):
-                    pygame.draw.rect(canvas, COLORS['green'], rect)
                 elif isinstance(cell, Key):
                     key_color = COLORS[cell.color]
                     center = (
@@ -429,7 +475,7 @@ class MegaGrid(gym.Env):
                                      ((i+1) * self.cell_size, j * self.cell_size))
 
         # Draw the agent
-        agent_color = COLORS['red']
+        agent_color = COLORS[self.agent.current_color]
         agent_pos = (
             int((self.agent_pos[0] + 0.5) * self.cell_size),
             int((self.agent_pos[1] + 0.5) * self.cell_size)
@@ -457,15 +503,15 @@ class MegaGrid(gym.Env):
 
         pygame.draw.polygon(canvas, agent_color, points)
 
-        # Draw the agent's inventory
-        for i, key_color in enumerate(self.agent.keys):
+        # Draw the agent's inventory (single key)
+        if self.agent.key:
             key_rect = pygame.Rect(
-                i * self.cell_size, 
+                0,  # Only one position needed
                 self.height * self.cell_size, 
                 self.cell_size, 
                 self.cell_size
             )
-            pygame.draw.rect(canvas, COLORS[key_color], key_rect)
+            pygame.draw.rect(canvas, COLORS[self.agent.key], key_rect)
             pygame.draw.rect(canvas, (0, 0, 0), key_rect, 1)  # Black outline
 
         # Draw the agent's star count
@@ -512,26 +558,40 @@ class MegaGrid(gym.Env):
         front_cell = self.grid.get(*front_pos)
 
         if isinstance(front_cell, Key):
-            self.agent.keys.append(front_cell.color)
-            self.grid.set(*front_pos, None)
-            print(f"Picked up {front_cell.color} key")
-        elif isinstance(front_cell, Door):
-            if front_cell.color in self.agent.keys:
-                self.grid.set(*front_pos, None)
-                self.agent.keys.remove(front_cell.color)
-                print(f"Unlocked {front_cell.color} door")
+            if self.agent.key is not None:
+                self.last_action_description = (
+                    f"Agent picked up a {front_cell.color} key"
+                )
+                # Swap keys with detailed description
+                old_key_color = self.agent.key
+                self.agent.key = front_cell.color
+                self.grid.set(*front_pos, Key(old_key_color))
             else:
-                print(f"No matching key for {front_cell.color} door")
+                # Pick up key with detailed description
+                self.agent.key = front_cell.color
+                self.grid.set(*front_pos, None)
+                
+        elif isinstance(front_cell, Door):
+            self.last_action_description = (
+                    f"Agent used a {self.agent.key} key on a {front_cell.color} door"
+                )
+            if self.agent.key == front_cell.color:
+                # Successful door interaction
+                self.grid.set(*front_pos, None)
+                
+                self.agent.key = None
         elif isinstance(front_cell, Star):
+            self.last_action_description = (
+                    f"Agent picked up a star"
+                )
             self.agent.stars += 1
             self.grid.set(*front_pos, None)
-            print(f"Collected a star! Total stars: {self.agent.stars}")
 
     def _get_fov(self):
-        """Get the cells in the agent's field of view (11x11 centered on agent), blocked by walls."""
+        """Get the cells in the agent's field of view (centered on agent), blocked by walls and closed doors."""
         fov = set()
         x, y = self.agent_pos
-        radius = 5  # For 11x11 grid (5 cells in each direction)
+        radius = 10  # For 21x21 grid (10 cells in each direction)
         
         # Always add the agent's position
         fov.add((x, y))
@@ -541,20 +601,19 @@ class MegaGrid(gym.Env):
             if not (0 <= pos[0] < self.width and 0 <= pos[1] < self.height):
                 return True
             cell = self.grid.get(*pos)
-            # Block vision for walls and locked doors
-            return isinstance(cell, Wall) or (isinstance(cell, Door) and not cell.is_open)
+            # Both walls and closed doors block vision
+            return (isinstance(cell, Wall) or 
+                    (isinstance(cell, Door) and not cell.is_open))
 
         # Cast rays in all directions
         for i in range(-radius, radius + 1):
             for j in range(-radius, radius + 1):
                 if i == 0 and j == 0:
-                    continue  # Skip agent's position (already added)
-                    
-                # Calculate the cells along the line from agent to target
+                    continue
+                
                 target_x, target_y = x + i, y + j
                 
                 # Use Bresenham's line algorithm
-                line = []
                 dx, dy = abs(target_x - x), abs(target_y - y)
                 x0, y0 = x, y
                 
@@ -569,23 +628,21 @@ class MegaGrid(gym.Env):
                 x_inc = (target_x - x) / float(steps)
                 y_inc = (target_y - y) / float(steps)
                 
-                # Start at agent position
                 curr_x, curr_y = x0, y0
-                
-                # Check each cell along the line
                 vision_blocked = False
+                
                 for _ in range(int(steps) + 1):
                     cell_x, cell_y = int(round(curr_x)), int(round(curr_y))
                     
-                    # If we hit a wall or go out of bounds, stop this ray
+                    # Add this cell to FOV before checking if it blocks vision
+                    if 0 <= cell_x < self.width and 0 <= cell_y < self.height:
+                        fov.add((cell_x, cell_y))
+                    
+                    # If we hit a wall, stop this ray
                     if blocks_vision((cell_x, cell_y)):
                         vision_blocked = True
                         break
-                        
-                    # Add this cell to FOV
-                    if 0 <= cell_x < self.width and 0 <= cell_y < self.height:
-                        fov.add((cell_x, cell_y))
-                        
+                    
                     if vision_blocked:
                         break
                         
