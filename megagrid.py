@@ -69,6 +69,10 @@ class MegaGrid(gym.Env):
 
         self.last_action_description = ""
 
+        self.current_room = None
+        self.steps_since_door = 0  # Add this to track steps since last door crossing
+        self.room_change_pending = False  # Add this to track if we need to announce room change
+
     @classmethod
     def make(cls, render_mode="human"):
         return cls(render_mode=render_mode)
@@ -269,6 +273,9 @@ class MegaGrid(gym.Env):
         self.agent.stars = 0
         self.agent.key = None
 
+        self.steps_since_door = 0
+        self.room_change_pending = False
+
         obs = self._get_obs()
         info = self._get_info()
 
@@ -281,6 +288,9 @@ class MegaGrid(gym.Env):
 
         # Clear the last action description
         self.last_action_description = ""
+
+        # Store the current room before movement
+        old_room = self._get_room_at_pos(self.agent_pos)
 
         if action == 4:  # Interact
             self._interact()
@@ -308,6 +318,23 @@ class MegaGrid(gym.Env):
             next_pos = tuple(next_pos)
             if self._can_move_to(next_pos):
                 self.agent_pos = next_pos
+                 # Check if room changed
+                new_room = self._get_room_at_pos(self.agent_pos)
+                if old_room != new_room:
+                    if new_room == old_room:  # Changed from new_room == self.current_room
+                        self.room_change_pending = False  # Cancel pending if returning to original room
+                    else:
+                        self.steps_since_door = 0
+                        self.room_change_pending = True
+                        self.current_room = new_room
+                
+                # Increment steps since door crossing
+                self.steps_since_door += 1
+
+                # Show room change message after 3 steps
+                if self.room_change_pending and self.steps_since_door >= 3:
+                    self.last_action_description = "Agent moves to a different room"
+                    self.room_change_pending = False
             else:
                 cell = self.grid.get(*next_pos) if 0 <= next_pos[0] < self.width and 0 <= next_pos[1] < self.height else None
 
@@ -558,16 +585,15 @@ class MegaGrid(gym.Env):
         front_cell = self.grid.get(*front_pos)
 
         if isinstance(front_cell, Key):
-            if self.agent.key is not None:
-                self.last_action_description = (
+            # Description 
+            self.last_action_description = (
                     f"Agent picked up a {front_cell.color} key"
                 )
-                # Swap keys with detailed description
+            if self.agent.key is not None:
                 old_key_color = self.agent.key
                 self.agent.key = front_cell.color
                 self.grid.set(*front_pos, Key(old_key_color))
             else:
-                # Pick up key with detailed description
                 self.agent.key = front_cell.color
                 self.grid.set(*front_pos, None)
                 
@@ -586,6 +612,16 @@ class MegaGrid(gym.Env):
                 )
             self.agent.stars += 1
             self.grid.set(*front_pos, None)
+
+    def _get_room_at_pos(self, pos):
+        """Return the room containing the given position"""
+        x, y = pos
+        for room in self.rooms:
+            room_x, room_y, room_w, room_h = room
+            if (room_x <= x < room_x + room_w and 
+                room_y <= y < room_y + room_h):
+                return room
+        return None
 
     def _get_fov(self):
         """Get the cells in the agent's field of view (centered on agent), blocked by walls and closed doors."""

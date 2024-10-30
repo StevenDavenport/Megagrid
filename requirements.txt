@@ -1,0 +1,9 @@
+# Install requirements using:
+# pip install -r requirements.txt
+
+gymnasium>=0.29.1
+pygame>=2.5.2
+numpy>=1.26.0
+opencv-python>=4.8.1
+scikit-image>=0.22.0
+minigrid>=2.3.1
